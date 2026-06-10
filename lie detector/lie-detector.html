@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TruthScan — AI Lie Detector</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;600&display=swap');
+
+  :root {
+    --bg: #030610;
+    --panel: #070d1f;
+    --border: #0d2040;
+    --accent: #00f5c4;
+    --red: #ff2d55;
+    --yellow: #ffd60a;
+    --blue: #0a84ff;
+    --glow-green: 0 0 12px #00f5c4aa;
+    --glow-red: 0 0 12px #ff2d55aa;
+    --text: #c8d8e8;
+    --dim: #4a6080;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    font-family: 'Rajdhani', sans-serif;
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Animated scanline background */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,245,196,0.015) 2px,
+      rgba(0,245,196,0.015) 4px
+    );
+    pointer-events: none;
+    z-index: 0;
+    animation: scanlines 8s linear infinite;
+  }
+  @keyframes scanlines { from { background-position: 0 0; } to { background-position: 0 100px; } }
+
+  header {
+    position: relative; z-index: 2;
+    border-bottom: 1px solid var(--border);
+    padding: 16px 32px;
+    display: flex; align-items: center; justify-content: space-between;
+    background: linear-gradient(90deg, #030610 0%, #050e20 100%);
+  }
+  .logo {
+    font-family: 'Orbitron', monospace;
+    font-size: 22px; font-weight: 900;
+    color: var(--accent);
+    text-shadow: var(--glow-green);
+    letter-spacing: 4px;
+  }
+  .logo span { color: var(--red); text-shadow: var(--glow-red); }
+  .status-bar {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px; color: var(--dim);
+    display: flex; gap: 24px;
+  }
+  .status-bar .live { color: var(--red); animation: blink 1s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  main {
+    position: relative; z-index: 1;
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    grid-template-rows: auto auto;
+    gap: 16px;
+    padding: 16px 24px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 18px;
+    position: relative;
+    overflow: hidden;
+  }
+  .panel::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    opacity: 0.4;
+  }
+
+  .panel-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px; letter-spacing: 3px;
+    color: var(--dim);
+    text-transform: uppercase;
+    margin-bottom: 14px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .panel-label::after {
+    content: ''; flex: 1; height: 1px;
+    background: linear-gradient(90deg, var(--border), transparent);
+  }
+
+  /* Camera panel */
+  .camera-panel { grid-column: 1; grid-row: 1; }
+  .camera-wrap {
+    position: relative;
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+    aspect-ratio: 16/9;
+  }
+  #videoEl {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+    display: block;
+  }
+  #faceCanvas {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+  }
+
+  /* Corner brackets */
+  .corner { position: absolute; width: 20px; height: 20px; }
+  .corner.tl { top: 8px; left: 8px; border-top: 2px solid var(--accent); border-left: 2px solid var(--accent); }
+  .corner.tr { top: 8px; right: 8px; border-top: 2px solid var(--accent); border-right: 2px solid var(--accent); }
+  .corner.bl { bottom: 8px; left: 8px; border-bottom: 2px solid var(--accent); border-left: 2px solid var(--accent); }
+  .corner.br { bottom: 8px; right: 8px; border-bottom: 2px solid var(--accent); border-right: 2px solid var(--accent); }
+
+  /* Scanning line animation */
+  .scan-line {
+    position: absolute; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    opacity: 0;
+    pointer-events: none;
+  }
+  .scanning .scan-line {
+    opacity: 0.6;
+    animation: scanY 2s ease-in-out infinite;
+  }
+  @keyframes scanY {
+    0% { top: 0%; } 50% { top: 95%; } 100% { top: 0%; }
+  }
+
+  /* Verdict overlay */
+  .verdict-overlay {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(3,6,16,0.82);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.4s;
+    flex-direction: column; gap: 8px;
+  }
+  .verdict-overlay.show { opacity: 1; }
+  .verdict-text {
+    font-family: 'Orbitron', monospace;
+    font-size: 42px; font-weight: 900;
+    letter-spacing: 6px;
+    animation: pulse 1s ease-in-out infinite;
+  }
+  .verdict-text.truth { color: var(--accent); text-shadow: var(--glow-green); }
+  .verdict-text.lie { color: var(--red); text-shadow: var(--glow-red); }
+  .verdict-conf {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px; color: var(--dim);
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.7} }
+
+  /* Side panel — metrics */
+  .metrics-panel { grid-column: 2; grid-row: 1 / 3; }
+
+  .metric-row {
+    margin-bottom: 16px;
+  }
+  .metric-name {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px; letter-spacing: 2px;
+    color: var(--dim); text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .metric-bar-wrap {
+    height: 6px; background: var(--border);
+    border-radius: 2px; overflow: hidden; margin-bottom: 3px;
+  }
+  .metric-bar {
+    height: 100%; border-radius: 2px;
+    transition: width 0.4s ease, background 0.4s ease;
+    width: 0%;
+  }
+  .metric-bar.low  { background: var(--accent); }
+  .metric-bar.mid  { background: var(--yellow); }
+  .metric-bar.high { background: var(--red); }
+
+  .metric-val {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px; color: var(--text);
+    display: flex; justify-content: space-between;
+  }
+
+  /* Deception score ring */
+  .score-section {
+    text-align: center; margin-bottom: 20px;
+    padding-bottom: 20px; border-bottom: 1px solid var(--border);
+  }
+  .score-ring-wrap {
+    position: relative; display: inline-block; margin: 8px auto;
+  }
+  #scoreRing { transform: rotate(-90deg); }
+  .score-number {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    font-family: 'Orbitron', monospace;
+    font-size: 26px; font-weight: 900;
+    color: var(--accent);
+    text-shadow: var(--glow-green);
+    transition: color 0.4s, text-shadow 0.4s;
+  }
+  .score-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px; letter-spacing: 3px; color: var(--dim);
+  }
+
+  /* Controls panel */
+  .controls-panel { grid-column: 1; grid-row: 2; }
+  .ctrl-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+
+  .btn {
+    font-family: 'Orbitron', monospace;
+    font-size: 11px; font-weight: 700;
+    letter-spacing: 2px; padding: 10px 20px;
+    border: 1px solid var(--accent); background: transparent;
+    color: var(--accent); cursor: pointer; border-radius: 2px;
+    transition: all 0.2s; text-transform: uppercase;
+  }
+  .btn:hover { background: rgba(0,245,196,0.1); box-shadow: var(--glow-green); }
+  .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .btn.danger { border-color: var(--red); color: var(--red); }
+  .btn.danger:hover { background: rgba(255,45,85,0.1); box-shadow: var(--glow-red); }
+  .btn.active { background: rgba(0,245,196,0.15); box-shadow: var(--glow-green); }
+
+  .question-display {
+    flex: 1; min-width: 200px;
+    background: var(--border);
+    border: 1px solid #1a3050;
+    border-radius: 2px;
+    padding: 10px 14px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 12px; color: var(--text);
+    min-height: 40px;
+    display: flex; align-items: center;
+  }
+
+  /* Voice waveform */
+  #waveCanvas {
+    width: 100%; height: 54px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    background: rgba(0,0,0,0.4);
+    margin-top: 12px;
+    display: block;
+  }
+
+  /* Log panel at bottom */
+  .log-section {
+    margin-top: 14px;
+  }
+  #logBox {
+    background: rgba(0,0,0,0.4);
+    border: 1px solid var(--border);
+    height: 90px; overflow-y: auto;
+    padding: 8px 10px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px; color: var(--dim);
+    border-radius: 2px;
+  }
+  #logBox p { margin-bottom: 2px; }
+  #logBox .log-truth { color: var(--accent); }
+  #logBox .log-lie { color: var(--red); }
+  #logBox .log-info { color: var(--blue); }
+
+  /* Emotion badges */
+  .emotion-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 6px; margin-top: 10px;
+  }
+  .emo-badge {
+    background: var(--border); border-radius: 2px;
+    padding: 5px 4px; text-align: center;
+    border: 1px solid transparent;
+    transition: border-color 0.3s;
+  }
+  .emo-badge.active { border-color: var(--accent); }
+  .emo-name { font-family: 'Share Tech Mono', monospace; font-size: 8px; color: var(--dim); }
+  .emo-val  { font-family: 'Orbitron', monospace; font-size: 11px; color: var(--text); font-weight: 700; }
+
+  /* Timestamp */
+  #clock {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px; color: var(--dim);
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  @media (max-width: 700px) {
+    main { grid-template-columns: 1fr; grid-template-rows: auto; }
+    .metrics-panel { grid-column: 1; grid-row: 3; }
+  }
+
+  /* Permission prompt */
+  #permPrompt {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(3,6,16,0.97);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 16px; text-align: center; padding: 24px;
+  }
+  #permPrompt h2 {
+    font-family: 'Orbitron', monospace; color: var(--accent);
+    font-size: 22px; letter-spacing: 4px;
+  }
+  #permPrompt p {
+    font-family: 'Rajdhani', sans-serif; color: var(--dim);
+    max-width: 380px; font-size: 15px; line-height: 1.5;
+  }
+  #permPrompt .note {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px; color: #2a4060; max-width: 380px;
+    margin-top: 8px;
+  }
+</style>
+</head>
+<body>
+
+<!-- Permission prompt -->
+<div id="permPrompt">
+  <h2>TRUTH SCAN</h2>
+  <p>This system uses your <strong>camera</strong> and <strong>microphone</strong> to analyze facial micro-expressions and vocal stress patterns in real time.</p>
+  <button class="btn" onclick="initSystem()">GRANT ACCESS & INITIALIZE</button>
+  <p class="note">⚠ For academic demonstration only. No data is stored or transmitted. Analysis uses heuristic models simulating real deception-detection research.</p>
+</div>
+
+<header>
+  <div class="logo">TRUTH<span>SCAN</span></div>
+  <div class="status-bar">
+    <span id="clock">--:--:--</span>
+    <span>SYS: STANDBY</span>
+    <span class="live">● REC</span>
+  </div>
+</header>
+
+<main>
+  <!-- Camera -->
+  <div class="panel camera-panel">
+    <div class="panel-label">BIOMETRIC FEED</div>
+    <div class="camera-wrap" id="camWrap">
+      <video id="videoEl" autoplay muted playsinline></video>
+      <canvas id="faceCanvas"></canvas>
+      <div class="corner tl"></div>
+      <div class="corner tr"></div>
+      <div class="corner bl"></div>
+      <div class="corner br"></div>
+      <div class="scan-line" id="scanLine"></div>
+      <div class="verdict-overlay" id="verdictOverlay">
+        <div class="verdict-text" id="verdictText">TRUTH</div>
+        <div class="verdict-conf" id="verdictConf">CONFIDENCE: 0%</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Metrics -->
+  <div class="panel metrics-panel">
+    <div class="panel-label">DECEPTION INDEX</div>
+    <div class="score-section">
+      <svg id="scoreRing" width="100" height="100" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="42" fill="none" stroke="#0d2040" stroke-width="8"/>
+        <circle id="ringArc" cx="50" cy="50" r="42" fill="none" stroke="#00f5c4" stroke-width="8"
+          stroke-linecap="round"
+          stroke-dasharray="264" stroke-dashoffset="264"
+          style="transition: stroke-dashoffset 0.5s ease, stroke 0.5s ease;"/>
+      </svg>
+      <div class="score-number" id="scoreNum">0%</div>
+      <div class="score-label">DECEPTION PROBABILITY</div>
+    </div>
+
+    <div class="metric-row">
+      <div class="metric-name">VOCAL PITCH VARIANCE</div>
+      <div class="metric-bar-wrap"><div class="metric-bar low" id="bar-pitch"></div></div>
+      <div class="metric-val"><span id="val-pitch">0%</span><span>HIGH = STRESS</span></div>
+    </div>
+    <div class="metric-row">
+      <div class="metric-name">SPEECH RATE ANOMALY</div>
+      <div class="metric-bar-wrap"><div class="metric-bar low" id="bar-rate"></div></div>
+      <div class="metric-val"><span id="val-rate">0%</span><span>HIGH = STUTTER/RUSH</span></div>
+    </div>
+    <div class="metric-row">
+      <div class="metric-name">MICRO-EXPRESSION FLUX</div>
+      <div class="metric-bar-wrap"><div class="metric-bar low" id="bar-expr"></div></div>
+      <div class="metric-val"><span id="val-expr">0%</span><span>SUPPRESSED EMOTION</span></div>
+    </div>
+    <div class="metric-row">
+      <div class="metric-name">EYE MOVEMENT INDEX</div>
+      <div class="metric-bar-wrap"><div class="metric-bar low" id="bar-eye"></div></div>
+      <div class="metric-val"><span id="val-eye">0%</span><span>GAZE AVERSION</span></div>
+    </div>
+    <div class="metric-row">
+      <div class="metric-name">HESITATION MARKERS</div>
+      <div class="metric-bar-wrap"><div class="metric-bar low" id="bar-hes"></div></div>
+      <div class="metric-val"><span id="val-hes">0%</span><span>FILLER WORDS</span></div>
+    </div>
+
+    <div class="panel-label" style="margin-top:14px;">FACIAL EMOTION STATE</div>
+    <div class="emotion-grid">
+      <div class="emo-badge" id="emo-neutral"><div class="emo-name">NEUTRAL</div><div class="emo-val" id="ev-neutral">--</div></div>
+      <div class="emo-badge" id="emo-stress"><div class="emo-name">STRESS</div><div class="emo-val" id="ev-stress">--</div></div>
+      <div class="emo-badge" id="emo-fear"><div class="emo-name">FEAR</div><div class="emo-val" id="ev-fear">--</div></div>
+      <div class="emo-badge" id="emo-disgust"><div class="emo-name">DISGUST</div><div class="emo-val" id="ev-disgust">--</div></div>
+      <div class="emo-badge" id="emo-joy"><div class="emo-name">JOY</div><div class="emo-val" id="ev-joy">--</div></div>
+      <div class="emo-badge" id="emo-contempt"><div class="emo-name">CONTEMPT</div><div class="emo-val" id="ev-contempt">--</div></div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="panel controls-panel">
+    <div class="panel-label">INTERROGATION CONTROLS</div>
+    <div class="ctrl-row">
+      <button class="btn" id="btnAnalyze" onclick="startAnalysis()" disabled>START ANALYSIS</button>
+      <button class="btn danger" id="btnStop" onclick="stopAnalysis()" disabled>STOP</button>
+      <button class="btn" id="btnVerdict" onclick="showVerdict()" disabled>RENDER VERDICT</button>
+      <button class="btn" id="btnNext" onclick="manualNextQuestion()" style="display:none;">NEXT</button>
+      <div class="question-display" id="questionDisplay">Press START ANALYSIS to begin session...</div>
+    </div>
+    <canvas id="waveCanvas"></canvas>
+    <div class="log-section">
+      <div class="panel-label" style="margin-top:10px;">SESSION LOG</div>
+      <div id="logBox"><p class="log-info">[SYS] TruthScan v2.1 ready. Awaiting camera access...</p></div>
+    </div>
+  </div>
+</main>
+
+<script>
+// ─── State ───────────────────────────────────────────────────────────────────
+let stream = null, audioCtx = null, analyser = null, animId = null;
+let isRunning = false, sampleTimer = null;
+let metrics = { pitch:0, rate:0, expr:0, eye:0, hes:0 };
+let score = 0;
+let frameCount = 0;
+let faceCx = null;
+
+const QUESTIONS = [
+  "State your full name for the record.",
+  "Have you ever lied to protect yourself?",
+  "Do you consider yourself an honest person?",
+  "Did you take what doesn't belong to you?",
+  "Is there something you are hiding right now?",
+  "Have you ever deceived someone you trusted?",
+  "Were you present at the location in question?",
+  "Do you know more than you are telling us?",
+];
+let qIdx = 0;
+
+// ─── Clock ────────────────────────────────────────────────────────────────────
+setInterval(() => {
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString('en-GB');
+}, 1000);
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+async function initSystem() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    document.getElementById('videoEl').srcObject = stream;
+    document.getElementById('permPrompt').style.display = 'none';
+    document.getElementById('btnAnalyze').disabled = false;
+    log('Camera and microphone initialized.', 'info');
+    log('Subject detected. Biometric baseline acquisition...', 'info');
+    setupAudio();
+    setupFaceCanvas();
+    drawWaveform();
+    drawFaceOverlay();
+    setTimeout(() => log('Baseline acquired. Ready for analysis.', 'info'), 1800);
+  } catch (e) {
+    alert('Camera/microphone access denied. Please allow and reload.');
+  }
+}
+
+function setupAudio() {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  const src = audioCtx.createMediaStreamSource(stream);
+  src.connect(analyser);
+}
+
+function setupFaceCanvas() {
+  const vid = document.getElementById('videoEl');
+  const cvs = document.getElementById('faceCanvas');
+  const resizeCanvas = () => {
+    cvs.width = vid.offsetWidth; cvs.height = vid.offsetHeight;
+  };
+  resizeCanvas();
+  new ResizeObserver(resizeCanvas).observe(vid);
+  faceCx = cvs.getContext('2d');
+}
+
+// ─── Waveform ─────────────────────────────────────────────────────────────────
+function drawWaveform() {
+  const cvs = document.getElementById('waveCanvas');
+  const ctx = cvs.getContext('2d');
+  cvs.width = cvs.offsetWidth; cvs.height = cvs.offsetHeight;
+
+  const draw = () => {
+    requestAnimationFrame(draw);
+    cvs.width = cvs.offsetWidth;
+    const W = cvs.width, H = cvs.height;
+    ctx.clearRect(0, 0, W, H);
+
+    if (!analyser) {
+      // idle sine
+      ctx.strokeStyle = '#0d2040';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (let x = 0; x < W; x++) {
+        const y = H/2 + Math.sin(x * 0.04 + Date.now()*0.002) * 4;
+        x === 0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+      }
+      ctx.stroke();
+      return;
+    }
+
+    const data = new Uint8Array(analyser.fftSize);
+    analyser.getByteTimeDomainData(data);
+
+    const gradient = ctx.createLinearGradient(0, 0, W, 0);
+    gradient.addColorStop(0, '#00f5c480');
+    gradient.addColorStop(0.5, isRunning ? '#ff2d5580' : '#00f5c480');
+    gradient.addColorStop(1, '#00f5c480');
+    ctx.strokeStyle = gradient;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    const sl = data.length / W;
+    for (let x = 0; x < W; x++) {
+      const v = data[Math.floor(x * sl)] / 128 - 1;
+      const y = H/2 + v * (H/2 - 4);
+      x === 0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+  };
+  draw();
+}
+
+// ─── Face overlay ─────────────────────────────────────────────────────────────
+function drawFaceOverlay() {
+  const cvs = document.getElementById('faceCanvas');
+  let t = 0;
+  // Simulated face box — realistic fixed position
+  let faceBox = { x: 0.28, y: 0.08, w: 0.44, h: 0.78 };
+  let lastJitter = { x:0,y:0 };
+
+  const draw = () => {
+    requestAnimationFrame(draw);
+    if (!faceCx || !cvs.width) return;
+    const W = cvs.width, H = cvs.height;
+    faceCx.clearRect(0, 0, W, H);
+    t++;
+
+    if (!isRunning && !stream) return;
+
+    // Subtle jitter
+    if (t % 8 === 0) {
+      lastJitter = { x: (Math.random()-0.5)*2, y: (Math.random()-0.5)*2 };
+    }
+    const jx = lastJitter.x, jy = lastJitter.y;
+
+    const bx = faceBox.x*W + jx, by = faceBox.y*H + jy;
+    const bw = faceBox.w*W, bh = faceBox.h*H;
+
+    // Face rectangle
+    const alpha = 0.7 + 0.3*Math.sin(t*0.05);
+    faceCx.strokeStyle = isRunning ? `rgba(255,45,85,${alpha})` : `rgba(0,245,196,${alpha})`;
+    faceCx.lineWidth = 1.5;
+    faceCx.setLineDash([6,4]);
+    faceCx.strokeRect(bx, by, bw, bh);
+    faceCx.setLineDash([]);
+
+    // Corner marks
+    const cs = 14;
+    [[bx,by],[bx+bw,by],[bx,by+bh],[bx+bw,by+bh]].forEach(([cx,cy],i) => {
+      faceCx.strokeStyle = isRunning ? '#ff2d55' : '#00f5c4';
+      faceCx.lineWidth = 2;
+      faceCx.beginPath();
+      if (i===0)      { faceCx.moveTo(cx,cy+cs); faceCx.lineTo(cx,cy); faceCx.lineTo(cx+cs,cy); }
+      else if (i===1) { faceCx.moveTo(cx-cs,cy); faceCx.lineTo(cx,cy); faceCx.lineTo(cx,cy+cs); }
+      else if (i===2) { faceCx.moveTo(cx,cy-cs); faceCx.lineTo(cx,cy); faceCx.lineTo(cx+cs,cy); }
+      else            { faceCx.moveTo(cx-cs,cy); faceCx.lineTo(cx,cy); faceCx.lineTo(cx,cy-cs); }
+      faceCx.stroke();
+    });
+
+    // Landmark points (eyes, nose, mouth) — proportional
+    if (isRunning) {
+      const pts = [
+        [bx+bw*0.28, by+bh*0.32], // left eye
+        [bx+bw*0.72, by+bh*0.32], // right eye
+        [bx+bw*0.50, by+bh*0.55], // nose
+        [bx+bw*0.35, by+bh*0.75], // mouth L
+        [bx+bw*0.65, by+bh*0.75], // mouth R
+      ];
+      pts.forEach(([px,py]) => {
+        const pulse = 2+Math.sin(t*0.1)*1;
+        faceCx.beginPath();
+        faceCx.arc(px+jx*0.3,py+jy*0.3, pulse, 0, Math.PI*2);
+        faceCx.fillStyle = '#ff2d55bb';
+        faceCx.fill();
+      });
+
+      // Scan line through face
+      const scanY = by + (bh * ((t%80)/80));
+      faceCx.strokeStyle = 'rgba(255,45,85,0.25)';
+      faceCx.lineWidth = 1;
+      faceCx.beginPath();
+      faceCx.moveTo(bx, scanY); faceCx.lineTo(bx+bw, scanY);
+      faceCx.stroke();
+    }
+
+    // Label
+    faceCx.fillStyle = isRunning ? '#ff2d55' : '#00f5c4';
+    faceCx.font = '10px "Share Tech Mono"';
+    faceCx.fillText(isRunning ? 'ANALYZING' : 'SUBJECT LOCKED', bx+4, by-6);
+  };
+  draw();
+}
+
+// ─── Analysis ─────────────────────────────────────────────────────────────────
+function startAnalysis() {
+  isRunning = true;
+  document.getElementById('btnAnalyze').disabled = true;
+  document.getElementById('btnStop').disabled = false;
+  document.getElementById('btnVerdict').disabled = true;
+  document.getElementById('camWrap').classList.add('scanning');
+  document.getElementById('verdictOverlay').classList.remove('show');
+
+  // Reset
+  score = 0; frameCount = 0;
+  Object.keys(metrics).forEach(k => metrics[k] = 0);
+  updateUI();
+  nextQuestion();
+  log('Analysis session started. Monitoring biometric signals...', 'info');
+
+  sampleTimer = setInterval(sampleSignals, 800);
+}
+
+function stopAnalysis() {
+  isRunning = false;
+  clearInterval(sampleTimer);
+  document.getElementById('btnAnalyze').disabled = false;
+  document.getElementById('btnStop').disabled = true;
+  document.getElementById('btnVerdict').disabled = false;
+  document.getElementById('camWrap').classList.remove('scanning');
+  log('Analysis paused. Press RENDER VERDICT for result.', 'info');
+}
+
+let autoAdvanceTimeout = null;
+function nextQuestion() {
+  if (!isRunning) return;
+  const q = QUESTIONS[qIdx % QUESTIONS.length];
+  document.getElementById('questionDisplay').textContent = '» ' + q;
+  log(`Q: "${q}"`, 'info');
+  qIdx++;
+  // Show Next button, hide if auto-advance
+  const btnNext = document.getElementById('btnNext');
+  btnNext.style.display = 'inline-block';
+  btnNext.disabled = false;
+  // Set up auto-advance after 12s
+  clearTimeout(autoAdvanceTimeout);
+  autoAdvanceTimeout = setTimeout(() => {
+    btnNext.style.display = 'none';
+    nextQuestion();
+  }, 12000);
+}
+
+function manualNextQuestion() {
+  // Hide Next button and advance immediately
+  const btnNext = document.getElementById('btnNext');
+  btnNext.style.display = 'none';
+  clearTimeout(autoAdvanceTimeout);
+  nextQuestion();
+}
+
+// ─── Signal sampling (heuristic simulation with real audio) ──────────────────
+function sampleSignals() {
+  if (!isRunning) return;
+  frameCount++;
+
+  // Real audio energy
+  let audioEnergy = 0;
+  if (analyser) {
+    const data = new Uint8Array(analyser.fftSize);
+    analyser.getByteTimeDomainData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) sum += Math.abs(data[i]-128);
+    audioEnergy = Math.min(1, (sum / data.length) / 30);
+  }
+
+  // Heuristic deception signals — vary over time with some randomness
+  // These simulate what real models would detect
+  const t = frameCount * 0.12;
+  const noise = () => Math.random() * 0.15;
+
+  // Each metric drifts with slow sine + noise + audio influence
+  metrics.pitch  = clamp(metrics.pitch  + (Math.sin(t*0.7)*0.06 + noise() - 0.06 + audioEnergy*0.12), 0, 1);
+  metrics.rate   = clamp(metrics.rate   + (Math.sin(t*0.5)*0.05 + noise() - 0.05 + audioEnergy*0.08), 0, 1);
+  metrics.expr   = clamp(metrics.expr   + (Math.sin(t*0.3)*0.04 + noise() - 0.05), 0, 1);
+  metrics.eye    = clamp(metrics.eye    + (Math.sin(t*0.4)*0.05 + noise() - 0.06), 0, 1);
+  metrics.hes    = clamp(metrics.hes    + (Math.sin(t*0.6)*0.05 + noise() - 0.05 + audioEnergy*0.06), 0, 1);
+
+  // Weighted deception score
+  score = clamp(
+    metrics.pitch*0.25 + metrics.rate*0.20 + metrics.expr*0.25 + metrics.eye*0.20 + metrics.hes*0.10,
+    0, 1
+  );
+
+  updateUI();
+  updateEmotions();
+
+  // Auto-log if score spikes
+  if (score > 0.72 && Math.random() < 0.08) {
+    log(`⚠ Stress spike detected — deception index: ${Math.round(score*100)}%`, 'lie');
+  } else if (score < 0.30 && Math.random() < 0.05) {
+    log(`✓ Stable biometrics — low deception signal`, 'truth');
+  }
+}
+
+function clamp(v,mn,mx) { return Math.max(mn, Math.min(mx, v)); }
+
+// ─── UI Update ────────────────────────────────────────────────────────────────
+function updateUI() {
+  const pct = Math.round(score * 100);
+  document.getElementById('scoreNum').textContent = pct + '%';
+
+  // Ring
+  const circumference = 264;
+  const offset = circumference - (score * circumference);
+  const ring = document.getElementById('ringArc');
+  ring.style.strokeDashoffset = offset;
+  ring.style.stroke = score > 0.65 ? '#ff2d55' : score > 0.40 ? '#ffd60a' : '#00f5c4';
+
+  const scoreEl = document.getElementById('scoreNum');
+  scoreEl.style.color = score > 0.65 ? '#ff2d55' : score > 0.40 ? '#ffd60a' : '#00f5c4';
+  scoreEl.style.textShadow = score > 0.65 ? '0 0 12px #ff2d55aa' : '0 0 12px #00f5c4aa';
+
+  // Bars
+  setBar('pitch', metrics.pitch);
+  setBar('rate',  metrics.rate);
+  setBar('expr',  metrics.expr);
+  setBar('eye',   metrics.eye);
+  setBar('hes',   metrics.hes);
+}
+
+function setBar(id, val) {
+  const pct = Math.round(val * 100);
+  const bar = document.getElementById('bar-'+id);
+  bar.style.width = pct + '%';
+  bar.className = 'metric-bar ' + (val > 0.65 ? 'high' : val > 0.40 ? 'mid' : 'low');
+  document.getElementById('val-'+id).textContent = pct + '%';
+}
+
+function updateEmotions() {
+  const emotions = {
+    neutral:  clamp(1 - score*1.1, 0, 1),
+    stress:   clamp(metrics.pitch*0.8 + metrics.hes*0.4, 0, 1),
+    fear:     clamp(metrics.eye*0.7 + metrics.expr*0.3, 0, 1),
+    disgust:  clamp(metrics.expr*0.6, 0, 1),
+    joy:      clamp(0.3 - score*0.5, 0, 1),
+    contempt: clamp(metrics.rate*0.4, 0, 1),
+  };
+  let maxEmo = 'neutral', maxVal = 0;
+  Object.entries(emotions).forEach(([k,v]) => {
+    const el = document.getElementById('ev-'+k);
+    el.textContent = Math.round(v*100) + '%';
+    document.getElementById('emo-'+k).classList.toggle('active', v === Math.max(...Object.values(emotions)));
+    if (v > maxVal) { maxVal = v; maxEmo = k; }
+  });
+}
+
+// ─── Verdict ──────────────────────────────────────────────────────────────────
+function showVerdict() {
+  const pct = Math.round(score * 100);
+  const isLie = score >= 0.5;
+  const overlay = document.getElementById('verdictOverlay');
+  const vtext = document.getElementById('verdictText');
+  const vconf = document.getElementById('verdictConf');
+
+  vtext.textContent = isLie ? 'DECEPTION' : 'TRUTH';
+  vtext.className = 'verdict-text ' + (isLie ? 'lie' : 'truth');
+  vconf.textContent = `CONFIDENCE: ${pct}% | ${isLie ? 'HIGH DECEPTION MARKERS' : 'LOW DECEPTION MARKERS'}`;
+  overlay.classList.add('show');
+  log(`VERDICT: ${isLie ? '⚠ DECEPTION DETECTED' : '✓ TRUTHFUL'} — ${pct}% index`, isLie ? 'lie' : 'truth');
+
+  setTimeout(() => overlay.classList.remove('show'), 5000);
+}
+
+// ─── Log ──────────────────────────────────────────────────────────────────────
+function log(msg, type='info') {
+  const box = document.getElementById('logBox');
+  const p = document.createElement('p');
+  p.className = type === 'lie' ? 'log-lie' : type === 'truth' ? 'log-truth' : 'log-info';
+  const ts = new Date().toLocaleTimeString('en-GB');
+  p.textContent = `[${ts}] ${msg}`;
+  box.appendChild(p);
+  box.scrollTop = box.scrollHeight;
+}
+</script>
+</body>
+</html>
